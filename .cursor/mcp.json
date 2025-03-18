@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "weather-server": {
+      "command": "node /Users/chenkefan/Project/MyApps/mcp-demos/weather-server/dist/index.js",
+      "args": [],
+      "env": {}
+    }
+  }
+}
