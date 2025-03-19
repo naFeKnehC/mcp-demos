@@ -28,60 +28,53 @@ class MCPClient {
     this.mcp = new Client({ name: "mcp-client-cli", version: "1.0.0" });
   }
 
-  private validateModelConfig() {
-    if (!OPENAI_MODEL_NAME) {
-      throw new Error("OPENAI_MODEL_NAME must be set in .env file");
+  async connectToServer(serverScriptPath: string): Promise<void> {
+    const fileExt = serverScriptPath.split(".").pop()?.toLowerCase();
+    if (!["js", "py"].includes(fileExt ?? "")) {
+      throw new Error("服务器脚本必须是 .js 或 .py 文件");
     }
-    return OPENAI_MODEL_NAME as string;
-  }
 
-  async connectToServer(serverScriptPath: string) {
-    try {
-      const isJs = serverScriptPath.endsWith(".js");
-      const isPy = serverScriptPath.endsWith(".py");
-      if (!isJs && !isPy) {
-        throw new Error("Server script must be a .js or .py file");
-      }
-      const command = isPy
+    const command =
+      fileExt === "py"
         ? process.platform === "win32"
           ? "python"
           : "python3"
         : process.execPath;
 
-      this.transport = new StdioClientTransport({
-        command,
-        args: [serverScriptPath],
-      });
-      this.mcp.connect(this.transport);
+    this.transport = new StdioClientTransport({
+      command,
+      args: [serverScriptPath],
+    });
 
-      const toolsResult = await this.mcp.listTools();
-      this.tools = toolsResult.tools.map((tool) => ({
-        type: "function",
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.inputSchema,
-        },
-      }));
-      console.log(
-        "Connected to server with tools:",
-        toolsResult.tools.map(({ name }) => name)
-      );
-    } catch (e) {
-      console.log("Failed to connect to MCP server: ", e);
-      throw e;
-    }
+    this.mcp.connect(this.transport);
+    await this.initializeTools();
   }
 
-  async chatLoop() {
+  private async initializeTools(): Promise<void> {
+    const toolsResult = await this.mcp.listTools();
+    this.tools = toolsResult.tools.map((tool) => ({
+      type: "function",
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.inputSchema,
+      },
+    }));
+    console.log(
+      "可用工具:",
+      toolsResult.tools.map(({ name }) => name).join(", ")
+    );
+  }
+
+  async chatLoop(): Promise<void> {
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
     });
 
     try {
-      console.log("\nMCP 客户端已启动!");
-      console.log("输入查询内容或输入 'quit' 退出");
+      console.log("\nMCP 客户端已启动");
+      console.log("输入查询内容或输入 'quit' 退出\n");
 
       while (true) {
         const message = await rl.question("\n查询: ");
@@ -96,67 +89,73 @@ class MCPClient {
     }
   }
 
-  async processQuery(query: string) {
-    const model = this.validateModelConfig();
+  private async processQuery(query: string): Promise<string> {
     const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-      {
-        role: "user",
-        content: query,
-      },
+      { role: "user", content: query },
     ];
 
-    let response = await this.openai.chat.completions.create({
-      model: model,
+    // 输入用户问题，调用function call，返回结果
+    const response = await this.openai.chat.completions.create({
+      model: OPENAI_MODEL_NAME as string,
       messages,
       tools: this.tools,
     });
 
     const message = response.choices[0].message;
 
-    messages.push(message);
-
-    let finalText = "";
-
-    if (message.tool_calls) {
-      for (const toolCall of message.tool_calls) {
-        try {
-          const toolName = toolCall.function.name;
-          const toolArgs = JSON.parse(toolCall.function.arguments);
-
-          const result = await this.mcp.callTool({
-            name: toolName,
-            arguments: toolArgs,
-          });
-
-          finalText += `[调用工具 ${toolName} 参数 ${JSON.stringify(
-            toolArgs
-          )}]\n`;
-
-          messages.push({
-            role: "tool",
-            content: JSON.stringify(result.content),
-            tool_call_id: toolCall.id,
-          });
-
-          response = await this.openai.chat.completions.create({
-            model: model,
-            messages,
-            // tools: this.tools,
-          });
-
-          console.log(messages, "messages");
-          console.log(response.choices[0].message, "response");
-
-          finalText += response.choices[0].message.content + "\n";
-        } catch (error) {
-          throw error;
-        }
-      }
-    } else {
-      finalText = message.content || "";
+    // 如果message没有tool_calls，则直接返回message.content
+    if (!message.tool_calls) {
+      return message.content || "";
     }
 
-    return finalText;
+    // 存在tool_calls，则将message追加进essages，并调用handleToolCalls处理tool_calls
+    messages.push(message);
+    return this.handleToolCalls(message.tool_calls, messages);
+  }
+
+  private async handleToolCalls(
+    toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[],
+    messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
+  ): Promise<string> {
+    let result = "";
+
+    for (const toolCall of toolCalls) {
+      try {
+        // 解析函数名和参数
+        const toolName = toolCall.function.name;
+        const toolArgs = JSON.parse(toolCall.function.arguments);
+        console.log(toolArgs, toolCall.function.arguments);
+
+        // 调用mcpserver - function拿到结果
+        const toolResult = await this.mcp.callTool({
+          name: toolName,
+          arguments: toolArgs,
+        });
+
+        // 将结果追加进messages
+        messages.push({
+          role: "tool",
+          content: JSON.stringify(toolResult.content),
+          tool_call_id: toolCall.id,
+        });
+
+        // 将结果再回给大模型，返回结果
+        const followUpResponse = await this.openai.chat.completions.create({
+          model: OPENAI_MODEL_NAME as string,
+          messages,
+          // 使用 deepseek function calling tools暂时无效（与openai存在差异）
+          // tools: this.tools,
+        });
+
+        result += followUpResponse.choices[0].message.content || "";
+      } catch (error) {
+        result += `工具调用失败: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+      }
+    }
+
+    return result;
   }
 
   async cleanup() {
@@ -173,6 +172,12 @@ async function main() {
   try {
     await mcpClient.connectToServer(process.argv[2]);
     await mcpClient.chatLoop();
+  } catch (error) {
+    console.error(
+      "程序错误:",
+      error instanceof Error ? error.message : String(error)
+    );
+    process.exit(1);
   } finally {
     await mcpClient.cleanup();
     process.exit(0);
