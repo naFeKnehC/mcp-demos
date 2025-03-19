@@ -1,16 +1,15 @@
 {
   "name": "mcp-client-demo",
   "version": "1.0.0",
-  "description": "MCP Client Demo",
-  "main": "dist/index.js",
+  "main": "index.js",
+  "author": "",
+  "license": "ISC",
+  "description": "",
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "test": "node dist/index.js"
+    "test": "npm run build &&node dist/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@modelcontextprotocol/sdk": "^1.7.0",
